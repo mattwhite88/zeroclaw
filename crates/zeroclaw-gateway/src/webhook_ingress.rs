@@ -585,6 +585,18 @@ async fn process_verified_message(
     #[cfg(test)] suppress_reply_send: bool,
     msg: &ChannelMessage,
 ) {
+    let route_agent = {
+        let config = state.config.read();
+        let channel_ref = format!("{}.{alias}", spec.channel);
+        config
+            .agent_route_for_message(
+                &channel_ref,
+                msg.platform_sender_id.as_deref(),
+                Some(&msg.reply_target),
+            )
+            .map(str::to_string)
+    };
+    let selected_agent = route_agent.as_deref().or(agent_override);
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
@@ -610,6 +622,11 @@ async fn process_verified_message(
             zeroclaw_api::session_keys::sanitize_session_key(&sender_session_id(&channel_ref, msg))
         }
     };
+    let session_id = if let Some(agent) = route_agent.as_deref() {
+        zeroclaw_api::session_keys::sanitize_session_key(&format!("{session_id}_agent_{agent}"))
+    } else {
+        session_id
+    };
 
     if state.auto_save && !zeroclaw_memory::should_skip_autosave_content(&msg.content) {
         let key = memory_key(msg);
@@ -628,7 +645,7 @@ async fn process_verified_message(
         state,
         &msg.content,
         Some(&session_id),
-        agent_override,
+        selected_agent,
     ))
     .await
     {

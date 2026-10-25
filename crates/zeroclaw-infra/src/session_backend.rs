@@ -28,7 +28,8 @@ pub struct SessionMetadata {
     /// Matrix room id, Slack thread ts, ...). `None` for direct messages
     /// or backends that don't track it.
     pub room_id: Option<String>,
-    /// Inbound sender id verbatim (Discord username, phone number, ...).
+    /// Stable platform-side sender ID when the channel provides one; otherwise
+    /// the inbound sender string (e.g. a Discord username or phone number).
     /// Not an FK — sessions can survive deletion of the upstream user.
     pub sender_id: Option<String>,
     /// Stable id of the authenticated principal that created the session
@@ -47,7 +48,8 @@ pub struct SessionContext<'a> {
     pub channel_id: Option<&'a str>,
     /// Platform-side room / thread id.
     pub room_id: Option<&'a str>,
-    /// Inbound sender id (channel-native username, phone, ...).
+    /// Stable channel-native sender ID when available; otherwise the inbound
+    /// sender string.
     pub sender_id: Option<&'a str>,
 }
 

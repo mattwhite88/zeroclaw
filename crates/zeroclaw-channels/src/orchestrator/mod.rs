@@ -1783,11 +1783,27 @@ fn runtime_conversation_history_key(
     ctx: &ChannelRuntimeContext,
     msg: &zeroclaw_api::channel::ChannelMessage,
 ) -> String {
-    if msg.channel == "webhook" && ctx.channels_by_name.contains_key("webhook") {
+    let history_key = if msg.channel == "webhook" && ctx.channels_by_name.contains_key("webhook") {
         conversation_history_key_in_scope(msg, &msg.channel)
     } else {
         conversation_history_key(msg)
+    };
+    let channel_key = channel_key_for_message(msg);
+    let config = ctx.live_config.read();
+    if config
+        .agent_route_for_message(
+            &channel_key,
+            msg.platform_sender_id.as_deref(),
+            Some(&msg.reply_target),
+        )
+        .is_some()
+    {
+        // Keep an explicit route's transcript separate from the channel
+        // owner's transcript and from any other agent a later config may
+        // route this sender to.
+        return sanitize_session_key(&format!("{history_key}_agent_{}", ctx.agent_alias.as_str()));
     }
+    history_key
 }
 
 /// Resolve durable autosave identity from the live channel registry.
@@ -9145,10 +9161,15 @@ fn stamp_session_routing_context(
                 Some(target)
             }
         });
+    let sender_id = msg
+        .platform_sender_id
+        .as_deref()
+        .filter(|sender| !sender.is_empty())
+        .or_else(|| Some(msg.sender.as_str()).filter(|sender| !sender.is_empty()));
     let context = zeroclaw_infra::session_backend::SessionContext {
         channel_id: channel_id.as_deref(),
         room_id,
-        sender_id: Some(msg.sender.as_str()).filter(|s| !s.is_empty()),
+        sender_id,
     };
     if let Err(e) = store.set_session_context(history_key, context) {
         ::zeroclaw_log::record!(
@@ -11762,22 +11783,34 @@ impl AgentRouter {
         if let Some(ctx) = &self.single_ctx {
             return Some(Arc::clone(ctx));
         }
-        if let Some(alias) = msg.channel_alias.as_deref().filter(|s| !s.is_empty()) {
-            let composite = format!("{}.{alias}", msg.channel);
-            // An explicit alias identifies a distinct configured channel. It
-            // must not fall back to another alias's bare platform owner.
-            return self
-                .owner_by_channel_key
-                .get(&composite)
-                .and_then(|agent| self.by_agent.get(agent))
-                .cloned();
-        }
-        if let Some(agent) = self.owner_by_channel_key.get(&msg.channel)
-            && let Some(ctx) = self.by_agent.get(agent)
+        let channel_key = channel_key_for_message(msg);
+        let owner_key = if msg
+            .channel_alias
+            .as_deref()
+            .is_some_and(|alias| !alias.is_empty())
         {
-            return Some(Arc::clone(ctx));
+            channel_key.as_str()
+        } else {
+            msg.channel.as_str()
+        };
+        let owner = self
+            .owner_by_channel_key
+            .get(owner_key)
+            .and_then(|agent| self.by_agent.get(agent));
+        if let Some(route_config_ctx) = owner.or_else(|| self.by_agent.values().next()) {
+            let config = route_config_ctx.live_config.read();
+            if let Some(agent) = config.agent_route_for_message(
+                &channel_key,
+                msg.platform_sender_id.as_deref(),
+                Some(&msg.reply_target),
+            ) {
+                // An explicit route is authoritative. If its target context is
+                // unavailable, fail closed rather than falling back to the
+                // channel owner.
+                return self.by_agent.get(agent).cloned();
+            }
         }
-        None
+        owner.cloned()
     }
 }
 
@@ -17681,7 +17714,16 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
             let owner_agent = m
                 .channel_id
                 .as_deref()
-                .and_then(|cid| owner_by_channel_key.get(cid).cloned())
+                .and_then(|cid| {
+                    config
+                        .agent_route_for_message(cid, m.sender_id.as_deref(), m.room_id.as_deref())
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    m.channel_id
+                        .as_deref()
+                        .and_then(|cid| owner_by_channel_key.get(cid).cloned())
+                })
                 .or_else(|| {
                     m.channel_id
                         .as_deref()
@@ -23386,6 +23428,108 @@ temperature = 0.3
         assert!(
             !Arc::ptr_eq(&resolved_clamps, &resolved_glados),
             "ctxs distinct"
+        );
+    }
+
+    #[test]
+    fn channel_agent_routes_select_sender_or_room_agent_before_channel_owner() {
+        let mut config = Config::default();
+        config.agent_routes = vec![
+            zeroclaw_config::multi_agent::AgentRouteConfig {
+                name: "personal-contact".to_string(),
+                channel: zeroclaw_config::providers::ChannelRef::new("telegram.work"),
+                sender_id: Some("123456789".to_string()),
+                reply_target: None,
+                agent: zeroclaw_config::multi_agent::AgentAlias::new("personal"),
+                ..Default::default()
+            },
+            zeroclaw_config::multi_agent::AgentRouteConfig {
+                name: "support-room".to_string(),
+                channel: zeroclaw_config::providers::ChannelRef::new("telegram.work"),
+                reply_target: Some("group-1".to_string()),
+                agent: zeroclaw_config::multi_agent::AgentAlias::new("community"),
+                ..Default::default()
+            },
+        ];
+        let context_for_config = |agent_alias: &str| {
+            let context_config = config.clone();
+            Arc::new(ChannelRuntimeContext {
+                agent_alias: Arc::new(agent_alias.to_string()),
+                prompt_config: Arc::new(context_config.clone()),
+                live_config: zeroclaw_config::live::LiveConfig::new(context_config).handle(),
+                ..(*router_test_ctx()).clone()
+            })
+        };
+        let default_ctx = context_for_config("default");
+        let personal_ctx = context_for_config("personal");
+        let group_ctx = context_for_config("community");
+        let by_agent = HashMap::from([
+            ("default".to_string(), Arc::clone(&default_ctx)),
+            ("personal".to_string(), Arc::clone(&personal_ctx)),
+            ("community".to_string(), Arc::clone(&group_ctx)),
+        ]);
+        let owners = HashMap::from([("telegram.work".to_string(), "default".to_string())]);
+        let router = AgentRouter::multi(by_agent, owners, None, None, None);
+
+        let mut direct = channel_message("telegram", Some("work"));
+        direct.platform_sender_id = Some("123456789".to_string());
+        direct.reply_target = "123456789".to_string();
+        assert!(Arc::ptr_eq(
+            &router.resolve(&direct).expect("sender route resolves"),
+            &personal_ctx,
+        ));
+        assert_ne!(
+            runtime_conversation_history_key(&personal_ctx, &direct),
+            runtime_conversation_history_key(&default_ctx, &direct),
+            "explicit sender routes must not reuse the channel owner's transcript"
+        );
+
+        let mut room = direct.clone();
+        room.reply_target = "group-1".to_string();
+        assert!(Arc::ptr_eq(
+            &router.resolve(&room).expect("reply-target route resolves"),
+            &group_ctx,
+        ));
+
+        direct.platform_sender_id = Some("987654321".to_string());
+        assert!(Arc::ptr_eq(
+            &router
+                .resolve(&direct)
+                .expect("unmatched sender uses channel owner"),
+            &default_ctx,
+        ));
+    }
+
+    #[test]
+    fn channel_agent_route_with_missing_context_fails_closed() {
+        let mut config = Config::default();
+        config.agent_routes = vec![zeroclaw_config::multi_agent::AgentRouteConfig {
+            name: "missing-agent-route".to_string(),
+            channel: zeroclaw_config::providers::ChannelRef::new("telegram.work"),
+            sender_id: Some("123456789".to_string()),
+            reply_target: None,
+            agent: zeroclaw_config::multi_agent::AgentAlias::new("missing-agent"),
+            ..Default::default()
+        }];
+        let default_ctx = Arc::new(ChannelRuntimeContext {
+            prompt_config: Arc::new(config.clone()),
+            live_config: zeroclaw_config::live::LiveConfig::new(config).handle(),
+            ..(*router_test_ctx()).clone()
+        });
+        let router = AgentRouter::multi(
+            HashMap::from([("default".to_string(), Arc::clone(&default_ctx))]),
+            HashMap::from([("telegram.work".to_string(), "default".to_string())]),
+            None,
+            None,
+            None,
+        );
+        let mut msg = channel_message("telegram", Some("work"));
+        msg.platform_sender_id = Some("123456789".to_string());
+        msg.reply_target = "123456789".to_string();
+
+        assert!(
+            router.resolve(&msg).is_none(),
+            "an explicit route must not silently fall back to the default agent"
         );
     }
 

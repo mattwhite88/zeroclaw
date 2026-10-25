@@ -125,6 +125,43 @@ Secrets (bot tokens, API keys, passwords) are stored encrypted; set them through
 
 Inbound senders are gated through [peer groups](./peer-groups.md), not a per-channel field.
 
+### Route admitted messages to another agent
+
+`[[agent_routes]]` provides optional, channel-independent overrides for
+inbound channel messages and authenticated webhooks using the shared webhook
+dispatch helper. Direct gateway chat requests use their own agent selector.
+Each rule must name a configured channel type or alias and match an exact
+`sender_id` (`ChannelMessage.platform_sender_id`), exact `reply_target`, or
+both. For example, one rule can route a sender on Telegram while another sends
+a specific Discord room to a different agent:
+
+```toml
+[[agent_routes]]
+name = "personal-contact"
+channel = "telegram.work"
+sender_id = "123456789"
+agent = "personal"
+
+[[agent_routes]]
+name = "support-room"
+channel = "discord.support"
+reply_target = "123456789012345678"
+agent = "support"
+```
+
+These rules select an agent **after** the channel's normal access checks; they
+do not authorize senders. A dotted channel alias takes precedence over a
+channel-type-wide rule. Within the same channel scope, a reply-target match is
+more specific than a sender match, and a rule matching both takes precedence
+over either alone. Unmatched messages continue to the agent bound through
+`agents.<alias>.channels` on the shared channel-listener path; a channel with no
+owner only dispatches messages that match an explicit route. Authenticated
+webhooks retain their existing fallback behavior when no route matches. Route
+targets must be configured, enabled agents; they do not need a duplicate
+channel binding. Explicitly routed conversations have agent-specific history
+rather than inheriting the channel owner's transcript. With no `agent_routes`
+entries, existing channel dispatch is unchanged.
+
 ### Model fallback notices
 
 `channels.model_fallback_notice` controls notices for ordinary fallback to a different model within the same provider family. The default is `off`. Cross-family fallback notices and safeguard notices keep their existing behavior in every mode.

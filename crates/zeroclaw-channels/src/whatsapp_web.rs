@@ -886,6 +886,17 @@ impl WhatsAppWebChannel {
         let mapped_phone = sender_resolution.mapped_phone;
         let sender_candidates = sender_resolution.candidates;
         let normalized = sender_resolution.allowed_phone;
+        let platform_sender_id = mapped_phone
+            .as_deref()
+            .and_then(Self::normalize_phone_token)
+            .or_else(|| {
+                let phone_jid = if sender_jid.is_lid() {
+                    sender_alt.as_ref().filter(|alt| !alt.is_lid())
+                } else {
+                    Some(&sender_jid)
+                };
+                phone_jid.and_then(|jid| Self::normalize_phone_token(&jid.to_string()))
+            });
 
         let is_group = info.source.is_group;
         let reply_target = Self::compute_reply_target(&chat);
@@ -1154,6 +1165,7 @@ impl WhatsAppWebChannel {
                 &context.tx,
                 context.alias.as_ref(),
                 &normalized,
+                platform_sender_id.clone(),
                 reply_target,
                 content,
                 Vec::new(),
@@ -1240,6 +1252,7 @@ impl WhatsAppWebChannel {
             &context.tx,
             context.alias.as_ref(),
             &normalized,
+            platform_sender_id,
             reply_target,
             content,
             attachments,
@@ -1830,6 +1843,7 @@ impl WhatsAppWebChannel {
         tx: &tokio::sync::mpsc::Sender<ChannelMessage>,
         alias: &str,
         sender: &str,
+        platform_sender_id: Option<String>,
         reply_target: String,
         content: String,
         attachments: Vec<MediaAttachment>,
@@ -1842,7 +1856,7 @@ impl WhatsAppWebChannel {
                 channel: "whatsapp".to_string(),
                 channel_alias: Some(alias.to_string()),
                 sender: sender.to_string(),
-                platform_sender_id: None,
+                platform_sender_id,
                 // Reply to the originating chat JID (DM or group), passed
                 // through unchanged (library handles LID addressing internally).
                 reply_target,
@@ -6228,6 +6242,11 @@ mod tests {
                     })
                     .expect("dispatch sender must remain open");
                 assert_eq!(dispatched.content, "policy probe");
+                assert_eq!(
+                    dispatched.platform_sender_id.as_deref(),
+                    Some("+15551234567"),
+                    "inbound route identity should use the normalized sender phone"
+                );
 
                 // `ignore` drops the chat type outright, so even the listed
                 // sender that just dispatched must now be refused. This is the

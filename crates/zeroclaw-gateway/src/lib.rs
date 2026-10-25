@@ -15007,6 +15007,67 @@ data: [DONE]\n\n";
 
     #[cfg(feature = "channel-whatsapp-cloud")]
     #[tokio::test]
+    async fn whatsapp_cloud_webhook_uses_generic_sender_agent_route() {
+        use zeroclaw_config::multi_agent::{AgentAlias, AgentRouteConfig};
+        use zeroclaw_config::providers::ChannelRef;
+        use zeroclaw_config::schema::AliasedAgentConfig;
+
+        let _capture_guard = lock_gateway_chat_dispatch_capture_for_test().await;
+        clear_gateway_chat_dispatch_captures_for_test();
+
+        let mut config = Config::default();
+        config.agents.insert(
+            "personal".to_string(),
+            AliasedAgentConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        config.agent_routes.push(AgentRouteConfig {
+            name: "personal-contact".to_string(),
+            channel: ChannelRef::new("whatsapp.work"),
+            sender_id: Some("+15551234567".to_string()),
+            agent: AgentAlias::new("personal"),
+            ..Default::default()
+        });
+        let authority = zeroclaw_runtime::LiveConfigAuthority::new(config);
+        let mut state = webhook_baseline_state();
+        state.config = authority.live_handle();
+        state.config_authority = authority.clone();
+        state.agent_lifecycle = authority.agent_lifecycle();
+        state.whatsapp = HashMap::from([(
+            "work".to_string(),
+            whatsapp_instance_allowing_all("work", "verify-work"),
+        )]);
+        state.whatsapp_app_secret =
+            HashMap::from([("work".to_string(), Arc::<str>::from("app-secret"))]);
+
+        let message = "route this Cloud API message";
+        let body = whatsapp_webhook_body("15551234567", message);
+        let response = Box::pin(handle_whatsapp_message_alias(
+            State(state),
+            Path("work".to_string()),
+            whatsapp_signed_headers("app-secret", &body),
+            Bytes::from(body),
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let capture = gateway_chat_dispatch_captures_for_test()
+            .into_iter()
+            .find(|capture| capture.message == message)
+            .expect("verified Cloud API message should dispatch");
+        assert_eq!(capture.agent_override.as_deref(), Some("personal"));
+        assert!(
+            capture
+                .session_id
+                .as_deref()
+                .is_some_and(|session| session.ends_with("_agent_personal"))
+        );
+    }
+
+    #[cfg(feature = "channel-whatsapp-cloud")]
+    #[tokio::test]
     async fn webhook_alias_path_preserves_signature_auth() {
         let mut state = webhook_baseline_state();
         state.whatsapp = HashMap::from([("work".to_string(), whatsapp_instance("work", "tok"))]);

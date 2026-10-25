@@ -181,6 +181,30 @@ pub struct PeerGroupConfig {
     pub admin_for_agent_scope: bool,
 }
 
+/// Generic inbound channel routing rule (`[[agent_routes]]`).
+///
+/// A route is channel-scoped and matches an exact platform sender ID, exact
+/// reply target, or both. It selects an agent after the channel's normal access
+/// policy has admitted the message; it does not grant access.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "agent_route"]
+#[serde(default)]
+pub struct AgentRouteConfig {
+    /// Stable config/editor key for this rule.
+    pub name: String,
+    /// Channel type (`"telegram"`) or exact channel alias (`"telegram.work"`).
+    pub channel: crate::providers::ChannelRef,
+    /// Exact `ChannelMessage.platform_sender_id` to match, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<String>,
+    /// Exact `ChannelMessage.reply_target` to match, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_target: Option<String>,
+    /// Enabled target agent alias.
+    pub agent: AgentAlias,
+}
+
 /// Inbound A2A discovery server configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -580,6 +604,37 @@ ignore = ["@known_spammer"]
         assert!(cfg.ignore.is_empty());
         // Default modality preserves the existing input-driven behavior.
         assert_eq!(cfg.output_modality, OutputModality::Mirror);
+    }
+
+    #[test]
+    fn agent_route_config_round_trips_sender_and_reply_target_matchers() {
+        let parsed: AgentRouteConfig = toml::from_str(
+            r#"
+name = "support-group"
+channel = "telegram.work"
+sender_id = "123456789"
+reply_target = "room-1"
+agent = "support"
+"#,
+        )
+        .expect("agent route parses");
+        assert_eq!(parsed.name, "support-group");
+        assert_eq!(parsed.channel.as_str(), "telegram.work");
+        assert_eq!(parsed.sender_id.as_deref(), Some("123456789"));
+        assert_eq!(parsed.reply_target.as_deref(), Some("room-1"));
+        assert_eq!(parsed.agent.as_str(), "support");
+
+        let serialized = toml::to_string(&parsed).expect("agent route serializes");
+        let round_trip: AgentRouteConfig =
+            toml::from_str(&serialized).expect("serialized agent route parses");
+        assert_eq!(round_trip, parsed);
+    }
+
+    #[test]
+    fn agent_route_config_defaults_to_no_matchers() {
+        let route = AgentRouteConfig::default();
+        assert!(route.sender_id.is_none());
+        assert!(route.reply_target.is_none());
     }
 
     #[test]

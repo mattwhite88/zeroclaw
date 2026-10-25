@@ -242,7 +242,9 @@ pub fn dirty_entry_for(refsite_path: &str) -> String {
     let segs: Vec<&str> = refsite_path.split('.').collect();
     match segs.first().copied() {
         // agents.<name>.* and peer_groups.<g>.* → the entry root.
-        Some("agents" | "peer_groups") if segs.len() >= 2 => format!("{}.{}", segs[0], segs[1]),
+        Some("agents" | "peer_groups") if segs.len() >= 2 => {
+            format!("{}.{}", segs[0], segs[1])
+        }
         // providers.<cat>.<fam>.<alias>.* → the provider entry.
         Some("providers") if segs.len() >= 4 => segs[..4].join("."),
         // Scalars / whole-vector fields (heartbeat.agent, acp.default_agent,
@@ -452,6 +454,8 @@ fn scrub_agent_refs(cfg: &mut Config, alias: &str) {
     for group in cfg.peer_groups.values_mut() {
         group.agents.retain(|m| m.as_str() != alias); // raw
     }
+    cfg.agent_routes
+        .retain(|route| route.agent.as_str() != alias);
 }
 
 fn delete_channel(
@@ -490,7 +494,10 @@ fn delete_channel(
 
     let applied = report.scrubs.clone();
     let target = format!("{channel_type}.{alias}");
-    scrub_channel_refs(cfg, &target);
+    let removes_last_alias = cfg
+        .get_map_keys(&section)
+        .is_some_and(|keys| keys.iter().all(|key| key == alias));
+    scrub_channel_refs(cfg, channel_type, &target, removes_last_alias);
     // Remove the `channels.<type>.<alias>` entry via the same generic map-key
     // path the gateway/CLI use.
     if let Err(e) = cfg.delete_map_key(&section, alias) {
@@ -520,10 +527,19 @@ fn delete_channel(
 /// to `target` (`"<type>.<alias>"`). `peer_groups.<g>.channel` is a HARD ref and
 /// is never scrubbed (a delete carrying one is refused before reaching here).
 /// Comparisons `.trim()` to mirror `find_all_references` and `validate()`.
-fn scrub_channel_refs(cfg: &mut Config, target: &str) {
+fn scrub_channel_refs(
+    cfg: &mut Config,
+    channel_type: &str,
+    target: &str,
+    removes_last_alias: bool,
+) {
     for agent in cfg.agents.values_mut() {
         agent.channels.retain(|ch| ch.trim() != target);
     }
+    cfg.agent_routes.retain(|route| {
+        let channel = route.channel.trim();
+        channel != target && !(removes_last_alias && channel == channel_type)
+    });
     cfg.escalation
         .alert_channels
         .retain(|ch| ch.trim() != target);
@@ -761,6 +777,16 @@ fn rewrite_agent_refs(cfg: &mut Config, old: &str, new: &str) -> Vec<String> {
             dirty.push(format!("peer_groups.{gname}"));
         }
     }
+    let mut routes_touched = false;
+    for route in &mut cfg.agent_routes {
+        if route.agent.as_str() == old {
+            route.agent = AgentAlias::new(new);
+            routes_touched = true;
+        }
+    }
+    if routes_touched {
+        dirty.push("agent_routes".to_string());
+    }
     dirty
 }
 
@@ -911,6 +937,16 @@ fn rewrite_channel_refs(cfg: &mut Config, channel_type: &str, old: &str, new: &s
             group.channel = new_target.as_str().into();
             dirty.push(format!("peer_groups.{gname}"));
         }
+    }
+    let mut routes_touched = false;
+    for route in &mut cfg.agent_routes {
+        if route.channel.trim() == old_target {
+            route.channel = new_target.as_str().into();
+            routes_touched = true;
+        }
+    }
+    if routes_touched {
+        dirty.push("agent_routes".to_string());
     }
     let mut alert_touched = false;
     for ch in cfg.escalation.alert_channels.iter_mut() {
@@ -1132,6 +1168,15 @@ fn collect_channel_refs(cfg: &Config, channel_type: &str, alias: &str, sites: &m
             ));
         }
     }
+    for (index, route) in cfg.agent_routes.iter().enumerate() {
+        if route.channel.trim() == target {
+            sites.push(RefSite::soft(
+                format!("agent_routes[{index}].channel"),
+                ScrubAction::DropFromVec { index },
+                route.channel.as_str(),
+            ));
+        }
+    }
     let removes_last_alias = cfg
         .get_map_keys(&format!("channels.{channel_type}"))
         .is_some_and(|keys| keys.iter().any(|k| k == alias) && keys.iter().all(|k| k == alias));
@@ -1142,6 +1187,15 @@ fn collect_channel_refs(cfg: &Config, channel_type: &str, alias: &str, sites: &m
                     format!("peer_groups.{gname}.channel"),
                     ScrubAction::Refuse,
                     group.channel.as_str(),
+                ));
+            }
+        }
+        for (index, route) in cfg.agent_routes.iter().enumerate() {
+            if route.channel.trim() == channel_type {
+                sites.push(RefSite::soft(
+                    format!("agent_routes[{index}].channel"),
+                    ScrubAction::DropFromVec { index },
+                    route.channel.as_str(),
                 ));
             }
         }
@@ -1262,6 +1316,15 @@ fn collect_agent_refs(cfg: &Config, alias: &str, sites: &mut Vec<RefSite>) {
             }
         }
     }
+    for (index, route) in cfg.agent_routes.iter().enumerate() {
+        if route.agent.as_str() == alias {
+            sites.push(RefSite::soft(
+                format!("agent_routes[{index}].agent"),
+                ScrubAction::DropFromVec { index },
+                route.agent.as_str(),
+            ));
+        }
+    }
     if let Some(target) = cfg.agents.get(alias)
         && target.enabled
     {
@@ -1311,6 +1374,7 @@ mod tests {
         let mut c = Config::default();
         c.agents.clear();
         c.peer_groups.clear();
+        c.agent_routes.clear();
         c.model_routes.clear();
         c.embedding_routes.clear();
         c.escalation.alert_channels.clear();
@@ -1409,6 +1473,12 @@ mod tests {
             ..Default::default()
         };
         cfg.peer_groups.insert("crew".to_string(), group);
+        cfg.agent_routes.push(crate::multi_agent::AgentRouteConfig {
+            name: "main-channel-route".to_string(),
+            channel: crate::providers::ChannelRef::new("discord.main"),
+            reply_target: Some("room-1".to_string()),
+            ..Default::default()
+        });
         cfg.escalation
             .alert_channels
             .push("discord.main".to_string());
@@ -1423,7 +1493,11 @@ mod tests {
             "peer_groups channel is a hard ref"
         );
         assert_eq!(report.blockers[0].path, "peer_groups.crew.channel");
-        assert_eq!(report.scrubs.len(), 2, "agent channel + alert_channel");
+        assert_eq!(
+            report.scrubs.len(),
+            3,
+            "agent channel, route, and alert channel"
+        );
         assert!(!report.allowed);
     }
 
@@ -1467,12 +1541,19 @@ mod tests {
         let mut group = PeerGroupConfig::default();
         group.agents.push(AgentAlias::new("bot"));
         cfg.peer_groups.insert("crew".to_string(), group);
+        cfg.agent_routes.push(crate::multi_agent::AgentRouteConfig {
+            name: "route-to-bot".to_string(),
+            channel: crate::providers::ChannelRef::new("discord.main"),
+            sender_id: Some("alice".to_string()),
+            agent: AgentAlias::new("bot"),
+            ..Default::default()
+        });
 
         let report = plan_delete(&cfg, &AliasKind::Agent, "bot");
-        // heartbeat (hard) + delegates + access + read_memory_from + peer member + acp
+        // heartbeat (hard) + delegates + access + read_memory_from + peer member + route + acp
         assert_eq!(report.blockers.len(), 1);
         assert_eq!(report.blockers[0].path, "heartbeat.agent");
-        assert_eq!(report.scrubs.len(), 5);
+        assert_eq!(report.scrubs.len(), 6);
         assert!(!report.allowed);
     }
 
@@ -2451,6 +2532,13 @@ mod tests {
         let mut group = PeerGroupConfig::default();
         group.agents.push(AgentAlias::new("bot"));
         cfg.peer_groups.insert("crew".to_string(), group);
+        cfg.agent_routes.push(crate::multi_agent::AgentRouteConfig {
+            name: "route-to-bot".to_string(),
+            channel: crate::providers::ChannelRef::new("discord.main"),
+            sender_id: Some("alice".to_string()),
+            agent: AgentAlias::new("bot"),
+            ..Default::default()
+        });
 
         let report = rename_with_cascade(&mut cfg, &AliasKind::Agent, "bot", "bot2")
             .expect("agent rename succeeds");
@@ -2492,6 +2580,7 @@ mod tests {
             cfg.peer_groups["crew"].agents,
             vec![AgentAlias::new("bot2")]
         );
+        assert_eq!(cfg.agent_routes[0].agent.as_str(), "bot2");
         // post-condition: nothing references the old alias
         assert!(find_all_references(&cfg, &AliasKind::Agent, "bot").is_empty());
         // dirty paths cover every touched entry/section + the entry-key swap, so
@@ -2503,6 +2592,7 @@ mod tests {
             "agents.bot2",
             "agents.lead",
             "peer_groups.crew",
+            "agent_routes",
         ] {
             assert!(
                 report.dirty_paths.iter().any(|p| p == expected),
@@ -2719,6 +2809,13 @@ mod tests {
                 ..Default::default()
             },
         );
+        cfg.agent_routes.push(crate::multi_agent::AgentRouteConfig {
+            name: "main-channel-route".to_string(),
+            channel: crate::providers::ChannelRef::new("discord.main"),
+            reply_target: Some("room-1".to_string()),
+            agent: AgentAlias::new("ops"),
+            ..Default::default()
+        });
         cfg.escalation
             .alert_channels
             .push("discord.main".to_string());
@@ -2742,6 +2839,7 @@ mod tests {
             cfg.peer_groups["ops_team"].channel.as_str(),
             "discord.primary"
         );
+        assert_eq!(cfg.agent_routes[0].channel.as_str(), "discord.primary");
         assert_eq!(
             cfg.escalation.alert_channels,
             vec!["discord.primary".to_string()]
@@ -2807,6 +2905,7 @@ mod tests {
             dirty_entry_for("model_routes[0].model_provider"),
             "model_routes"
         );
+        assert_eq!(dirty_entry_for("agent_routes[0].agent"), "agent_routes");
         // provider entry → the 4-segment entry path.
         assert_eq!(
             dirty_entry_for("providers.models.anthropic.default.fallback[0]"),

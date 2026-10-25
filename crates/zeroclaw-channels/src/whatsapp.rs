@@ -647,6 +647,7 @@ impl WhatsAppChannel {
                     messages.push(ChannelMessage {
                         id: Uuid::new_v4().to_string(),
                         reply_target: normalized_from.clone(),
+                        platform_sender_id: Some(normalized_from.clone()),
                         sender: normalized_from,
                         content,
                         channel: "whatsapp".to_string(),
@@ -1279,11 +1280,16 @@ mod tests {
                 .is_empty(),
             "an ignored sender must not ride the wildcard"
         );
+        let messages = ch.parse_webhook_payload(&text_webhook_from("15559999999"));
         assert_eq!(
-            ch.parse_webhook_payload(&text_webhook_from("15559999999"))
-                .len(),
+            messages.len(),
             1,
             "an unignored sender still rides the wildcard"
+        );
+        assert_eq!(
+            messages[0].platform_sender_id.as_deref(),
+            Some("+15559999999"),
+            "Cloud API sender ID should use the normalized E.164 form"
         );
     }
 

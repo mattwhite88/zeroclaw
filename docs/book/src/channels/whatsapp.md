@@ -35,6 +35,14 @@ WhatsApp Web mode links a regular WhatsApp account through the optional Web back
 
 On first start, the Web backend pairs the account using QR or pair-code linking (`pair_phone` seeds pair-code linking; leave it unset for QR). Keep `session_path` on persistent storage; removing it forces a fresh device link. Bind the channel to an agent via that agent's `channels` list.
 
+Override that owner for selected senders or chats with the generic
+[`agent_routes`](./overview.md#route-admitted-messages-to-another-agent)
+configuration: sender IDs are normalized E.164 numbers, and Web group chat
+reply targets are their WhatsApp group JIDs. The generic sender route also
+works for authenticated Cloud API webhook messages. If a Web sender's LID
+cannot be resolved to a phone number, its `sender_id` route cannot match; an
+exact room route can still match.
+
 `push_name` sets the display name recipients see; leave it unset and the account keeps the name the phone was registered with. It is applied on connect, only when it differs from the name the linked device already carries, and a failure to apply it is logged without stopping the channel. Cloud API mode ignores it; there the display name comes from the Meta Business profile.
 
 The shared `interrupt_on_new_message` option applies to both Cloud API mode and Web mode. When enabled, a newer WhatsApp message from the same sender/chat cancels the in-flight response.

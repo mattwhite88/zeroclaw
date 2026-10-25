@@ -633,6 +633,15 @@ pub struct Config {
     #[nested]
     pub peer_groups: HashMap<String, crate::multi_agent::PeerGroupConfig>,
 
+    /// Optional inbound message-to-agent routing overrides. Empty by default;
+    /// unmatched messages continue to the agent bound through
+    /// `agents.<alias>.channels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[nested]
+    #[natural_key = "name"]
+    #[group = "Multi-agent"]
+    pub agent_routes: Vec<crate::multi_agent::AgentRouteConfig>,
+
     /// Hooks configuration (lifecycle hooks and built-in hook toggles).
     #[serde(default)]
     #[nested]
@@ -5064,6 +5073,57 @@ impl Config {
             .iter()
             .find(|(_, agent)| agent.enabled && agent.channels.iter().any(|c| c == channel_alias))
             .map(|(alias, _)| alias.as_str())
+    }
+
+    /// Resolve an explicit inbound route for one normalized channel message.
+    /// The channel dispatcher uses the returned agent as an override of the
+    /// channel owner; this lookup never grants sender access.
+    #[must_use]
+    pub fn agent_route_for_message(
+        &self,
+        channel_ref: &str,
+        sender_id: Option<&str>,
+        reply_target: Option<&str>,
+    ) -> Option<&str> {
+        let mut best: Option<(u8, &str)> = None;
+        for route in &self.agent_routes {
+            if route.sender_id.is_none() && route.reply_target.is_none() {
+                continue;
+            }
+            let route_channel = route.channel.as_str();
+            let channel_matches = route_channel == channel_ref
+                || (!route_channel.contains('.')
+                    && channel_ref
+                        .strip_prefix(route_channel)
+                        .is_some_and(|suffix| suffix.starts_with('.')));
+            if !channel_matches
+                || route
+                    .sender_id
+                    .as_deref()
+                    .is_some_and(|expected| sender_id != Some(expected))
+                || route
+                    .reply_target
+                    .as_deref()
+                    .is_some_and(|expected| reply_target != Some(expected))
+            {
+                continue;
+            }
+
+            // A dotted channel alias overrides a channel-type rule. For the
+            // same channel scope, reply-target matches are more specific than
+            // sender matches; a rule matching both wins over either alone.
+            let score = u8::from(route_channel.contains('.')) * 4
+                + u8::from(route.sender_id.is_some())
+                + u8::from(route.reply_target.is_some()) * 2;
+            let should_replace = match best {
+                None => true,
+                Some((best_score, _)) => score > best_score,
+            };
+            if should_replace {
+                best = Some((score, route.agent.as_str()));
+            }
+        }
+        best.map(|(_, agent)| agent)
     }
 
     /// Workspace dir a channel's inbound-media handler writes into. Resolves
@@ -21257,6 +21317,7 @@ impl Default for Config {
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
             peer_groups: HashMap::new(),
+            agent_routes: Vec::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
@@ -26046,6 +26107,134 @@ impl Config {
                         "peer_groups.{group_name}.agents[{i}] = {member_str:?} but agents.{member_str}.channels has no {needs_msg}",
                     );
                 }
+            }
+        }
+
+        // Generic inbound routing overrides. These choose the target agent
+        // only after channel authorization; they do not grant sender access.
+        let mut route_names = std::collections::HashSet::new();
+        let mut route_matchers = std::collections::HashSet::new();
+        for (index, route) in self.agent_routes.iter().enumerate() {
+            let route_path = format!("agent_routes[{index}]");
+            if route.name.trim().is_empty() {
+                validation_bail!(
+                    RequiredFieldEmpty,
+                    format!("{route_path}.name"),
+                    "{route_path}.name must not be empty"
+                );
+            }
+            if !route_names.insert(route.name.as_str()) {
+                validation_bail!(
+                    InvalidFormat,
+                    format!("{route_path}.name"),
+                    "agent_routes contains duplicate name {:?}",
+                    route.name
+                );
+            }
+
+            let channel = route.channel.as_str();
+            if channel.trim() != channel {
+                validation_bail!(
+                    InvalidFormat,
+                    format!("{route_path}.channel"),
+                    "{route_path}.channel must not have leading or trailing whitespace"
+                );
+            }
+            match self.classify_peer_group_channel_ref(channel) {
+                PeerGroupChannelRef::Empty => validation_bail!(
+                    RequiredFieldEmpty,
+                    format!("{route_path}.channel"),
+                    "{route_path}.channel must name a configured channel type or alias"
+                ),
+                PeerGroupChannelRef::BareType {
+                    channel_type,
+                    configured: false,
+                } => validation_bail!(
+                    DanglingReference,
+                    format!("{route_path}.channel"),
+                    "{route_path}.channel = {channel:?} but no \
+                     [channels.{channel_type}.*] block is configured"
+                ),
+                PeerGroupChannelRef::Dotted {
+                    channel_type,
+                    type_configured: false,
+                    ..
+                } => validation_bail!(
+                    DanglingReference,
+                    format!("{route_path}.channel"),
+                    "{route_path}.channel = {channel:?} but no \
+                     [channels.{channel_type}.*] block is configured"
+                ),
+                PeerGroupChannelRef::Dotted {
+                    channel_type,
+                    alias,
+                    exists: false,
+                    ..
+                } => validation_bail!(
+                    DanglingReference,
+                    format!("{route_path}.channel"),
+                    "{route_path}.channel = {channel:?} but \
+                     [channels.{channel_type}.{alias}] is not configured"
+                ),
+                PeerGroupChannelRef::BareType {
+                    configured: true, ..
+                }
+                | PeerGroupChannelRef::Dotted { exists: true, .. } => {}
+            }
+
+            let sender_id = route.sender_id.as_deref();
+            let reply_target = route.reply_target.as_deref();
+            if sender_id.is_none() && reply_target.is_none() {
+                validation_bail!(
+                    RequiredFieldEmpty,
+                    route_path,
+                    "{route_path} must set sender_id, reply_target, or both"
+                );
+            }
+            for (field, value) in [("sender_id", sender_id), ("reply_target", reply_target)] {
+                if value.is_some_and(|value| value.trim().is_empty()) {
+                    validation_bail!(
+                        RequiredFieldEmpty,
+                        format!("{route_path}.{field}"),
+                        "{route_path}.{field} must not be empty when set"
+                    );
+                }
+                if value.is_some_and(|value| value.trim() != value) {
+                    validation_bail!(
+                        InvalidFormat,
+                        format!("{route_path}.{field}"),
+                        "{route_path}.{field} must not have leading or trailing whitespace"
+                    );
+                }
+            }
+
+            let matcher = (
+                channel.to_string(),
+                sender_id.map(str::to_string),
+                reply_target.map(str::to_string),
+            );
+            if !route_matchers.insert(matcher) {
+                validation_bail!(
+                    InvalidFormat,
+                    format!("{route_path}.channel"),
+                    "agent_routes contains a duplicate channel/sender_id/reply_target match"
+                );
+            }
+
+            let target = route.agent.as_str();
+            let Some(agent) = self.agents.get(target) else {
+                validation_bail!(
+                    DanglingReference,
+                    format!("{route_path}.agent"),
+                    "{route_path}.agent = {target:?} but agents.{target} is not configured"
+                );
+            };
+            if !agent.enabled {
+                validation_bail!(
+                    InvalidFormat,
+                    format!("{route_path}.agent"),
+                    "{route_path}.agent = {target:?} but agents.{target} is disabled"
+                );
             }
         }
 
@@ -33873,6 +34062,7 @@ auto_save = true
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
             peer_groups: HashMap::new(),
+            agent_routes: Vec::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
@@ -35315,6 +35505,7 @@ default_temperature = 0.7
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
             peer_groups: HashMap::new(),
+            agent_routes: Vec::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
@@ -36634,6 +36825,31 @@ bot_token = "xoxb-tok"
         let toml_str = toml::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.phone_number_id, Some("12345".into()));
+    }
+
+    #[tokio::test]
+    async fn agent_routes_validate_channel_and_agent_references() {
+        let mut config = Config::default();
+        config
+            .channels
+            .telegram
+            .insert("work".to_string(), TelegramConfig::default());
+        config
+            .agent_routes
+            .push(crate::multi_agent::AgentRouteConfig {
+                name: "personal-contact".to_string(),
+                channel: crate::providers::ChannelRef::new("telegram.work"),
+                sender_id: Some("123456789".to_string()),
+                reply_target: None,
+                agent: crate::multi_agent::AgentAlias::new("missing-agent"),
+            });
+
+        let error = config
+            .validate()
+            .expect_err("unknown agent route target must be rejected")
+            .to_string();
+        assert!(error.contains("agent_routes[0].agent"));
+        assert!(error.contains("agents.missing-agent is not configured"));
     }
 
     #[test]
