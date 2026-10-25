@@ -161,6 +161,16 @@ Runs only when Docker image, Compose, or release-Docker context files change. It
 
 The all-features `Containerfile` source image builds for `linux/amd64` when that file or the Docker workflow changes. It uses an isolated cache scope and is neither loaded nor pushed. The Alpine amd64 lane runs both binaries, starts the built image through the merged Compose configuration, and checks the gateway health and dashboard surfaces. The Alpine arm64 lane is compile- and image-assembly coverage only. It cross-builds on `blacksmith-8vcpu-ubuntu-2404`, the existing 32 GB heavy Rust runner class, because its release link exhausted memory on `ubuntu-latest`. Other Docker jobs remain on `ubuntu-latest`; release optimization, build flags and matrix size are unchanged. Compose-only changes use a reduced Alpine amd64 matrix so they still exercise the runtime contract without rebuilding unrelated images. All jobs have read-only repository permissions and no registry write permission.
 
+### Branch Container Build (`container-build.yml`)
+
+Runs on every branch push and builds the root `Dockerfile` for `linux/amd64`,
+passing the triggering commit as `ZEROCLAW_BUILD_ID`. Pushes to the canonical
+`zeroclaw-labs/zeroclaw` repository publish to GHCR as
+`ghcr.io/zeroclaw-labs/zeroclaw:<branch-slug>-<short-sha>`. Fork branch builds
+run the same Docker build without logging in or publishing. Pull requests are
+covered separately by Docker Image PR Check, which builds relevant images
+without pushing.
+
 ### Docker Publish (`docker-publish.yml`)
 
 Builds, signs, and scans the generated four-variant matrix from `dev/ci/docker-tags.toml`: `minimal`, `default-features`, `dist`, and `all-features`. A human-created `v*` tag starts this workflow directly. A stable release started with `workflow_dispatch` creates its tag with `GITHUB_TOKEN`, which does not emit another tag-push event, so `release-stable-manual.yml` calls Docker Publish synchronously at the immutable release tag after the canonical release and Docker jobs succeed.

@@ -26,6 +26,7 @@ Maintainers with merge authority: `JordanTheJet`, `Audacity88`, `WareWolf-MoonWa
 
 | File | Trigger | Purpose |
 |---|---|---|
+| `container-build.yml` | `push` to any branch | Build the `linux/amd64` Docker image; pushes branch-SHA tags to GHCR for the canonical repository and validates without publishing on forks. |
 | `ci.yml` | `pull_request` → `master`; `push` → `master`; `merge_group` (dormant) | Required lint + test + build on PRs and trusted post-merge cache-warming runs, including feature-enabled hardware library tests on Linux. The `merge_group` trigger stays wired but never fires while the merge queue is disabled. |
 | `windows-tests.yml` | `pull_request` → `master`, with `ci:windows` present; relevant label additions and PR updates | Opt-in affected-scope Windows nextest, feature-enabled hardware library tests, and conditional plugin-host coverage, outside the required gate. |
 | `platform-tests.yml` | changes to this workflow in a `pull_request` → `master`; `workflow_dispatch`; nightly schedule | Advisory macOS/Windows workspace tests, outside the required PR gate and merge queue. |
@@ -47,7 +48,8 @@ Maintainers with merge authority: `JordanTheJet`, `Audacity88`, `WareWolf-MoonWa
 |---|---|
 | PR opened or updated against `master` | `ci.yml` (required lint + test + build), `windows-tests.yml` (advisory tests only with `ci:windows`), `pr-path-labeler.yml`, `pr-size-labeler.yml`, and report-only `pr-risk-labeler.yml`; `platform-tests.yml` only when that workflow changes |
 | PR added to the merge queue (`merge_group`) | **Inactive**: the merge queue is currently disabled. If re-enabled, `ci.yml` runs the full gate on a temporary `gh-readonly-queue/master/…` branch stacking the base + earlier queue entries + this PR. |
-| Push to `master` | `ci.yml` (post-merge quality signal + trusted Rust cache warming) |
+| Push to a branch | `container-build.yml` (amd64 Docker build; GHCR publish on the canonical repository) |
+| Push to `master` | `ci.yml` (post-merge quality signal + trusted Rust cache warming) and `container-build.yml` |
 | Nightly at 03:17 UTC | `platform-tests.yml` (scheduled macOS/Windows tests) |
 | Manual dispatch | `platform-tests.yml`, `cross-platform-build-manual.yml`, `cross-platform-clippy.yml`, `docker-publish.yml`, `trivy-scheduled.yml`, `pr-risk-labeler.yml`, `project-dashboard-plan.yml`, or `release-stable-manual.yml` |
 | Tag push `vX.Y.Z` | `release-stable-manual.yml` (full release pipeline) and `docker-publish.yml` (generated variant matrix) |
