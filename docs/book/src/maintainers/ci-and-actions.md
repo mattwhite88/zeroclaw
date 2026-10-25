@@ -163,13 +163,13 @@ The all-features `Containerfile` source image builds for `linux/amd64` when that
 
 ### Branch Container Build (`container-build.yml`)
 
-Runs on every branch push and builds the root `Dockerfile` for `linux/amd64`,
-passing the triggering commit as `ZEROCLAW_BUILD_ID`. Pushes to the canonical
-`zeroclaw-labs/zeroclaw` repository publish to GHCR as
-`ghcr.io/zeroclaw-labs/zeroclaw:<branch-slug>-<short-sha>`. Fork branch builds
-run the same Docker build without logging in or publishing. Pull requests are
-covered separately by Docker Image PR Check, which builds relevant images
-without pushing.
+Runs on every branch push in `mattwhite88/zeroclaw` and builds the root
+`Dockerfile` for `linux/amd64`, passing the triggering commit as
+`ZEROCLAW_BUILD_ID`. It publishes to GHCR as
+`ghcr.io/mattwhite88/zeroclaw:<branch-slug>-<short-sha>`. The job is skipped
+when this workflow runs in another repository, including upstream. Pull
+requests are covered separately by Docker Image PR Check, which builds relevant
+images without pushing.
 
 ### Docker Publish (`docker-publish.yml`)
 

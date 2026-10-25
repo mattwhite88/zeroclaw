@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   build:
+    if: github.repository == 'mattwhite88/zeroclaw'
     name: Build and push linux/amd64 image
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -44,15 +45,10 @@ jobs:
             echo '### Branch container image'
             echo
             echo "Built \`${image_ref}\` for \`linux/amd64\`."
-            if [[ "$GITHUB_REPOSITORY" == 'zeroclaw-labs/zeroclaw' ]]; then
-              echo 'Publish destination: GHCR.'
-            else
-              echo 'Fork builds are validated without publishing to GHCR.'
-            fi
+            echo 'Publish destination: GHCR for mattwhite88/zeroclaw.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Log in to GHCR
-        if: github.repository == 'zeroclaw-labs/zeroclaw'
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
@@ -68,6 +64,6 @@ jobs:
           context: .
           file: Dockerfile
           platforms: linux/amd64
-          push: ${{ github.repository == 'zeroclaw-labs/zeroclaw' }}
+          push: true
           tags: ${{ steps.image.outputs.ref }}
           build-args: ZEROCLAW_BUILD_ID=${{ github.sha }}
